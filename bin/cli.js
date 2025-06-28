@@ -1,6 +1,9 @@
 #!/usr/bin/env node
 // Shebang 行，指定使用 node 执行
 
+// 加载环境变量
+require('dotenv').config();
+
 // 导入核心 CLI 框架
 const { program } = require('commander'); // CLI 参数解析和命令管理
 const path = require('path'); // 跨平台路径处理
@@ -165,10 +168,424 @@ async function promptUser() {
   return answers;
 }
 
+// Git工作流完整函数
+async function generateCommitMessage() {
+  console.log(chalk.cyan('🤖 AI Git 完整工作流助手\n'));
+
+  // 检查是否在git仓库中
+  if (!shell.which('git')) {
+    console.error(chalk.red('❌ Git未安装或不在PATH中'));
+    process.exit(1);
+  }
+
+  // 检查是否在git仓库中
+  const isGitRepo =
+    shell.exec('git rev-parse --is-inside-work-tree', { silent: true }).code ===
+    0;
+  if (!isGitRepo) {
+    console.error(chalk.red('❌ 当前目录不是Git仓库'));
+    process.exit(1);
+  }
+
+  try {
+    // 步骤1: Git Add
+    await handleGitAdd();
+    
+    // 步骤2: 生成并执行Commit
+    const commitMessage = await generateAndCommit();
+    if (!commitMessage) {
+      console.log(chalk.yellow('🚫 用户取消了提交操作'));
+      process.exit(0);
+    }
+
+    // 步骤3: Git Pull
+    await handleGitPull();
+
+    // 步骤4: Git Push  
+    await handleGitPush();
+
+    console.log(chalk.green('\n🎉 Git工作流执行完成！'));
+    console.log(chalk.gray(`📋 最终提交: ${commitMessage}`));
+
+  } catch (error) {
+    console.error(chalk.red('\n❌ Git工作流执行失败:'), error.message);
+    console.log(chalk.yellow('💡 请手动处理后重试'));
+    process.exit(1);
+  }
+}
+
+// Git Add 处理函数
+async function handleGitAdd() {
+  const spinner = ora('📋 正在检查文件状态...').start();
+  
+  const gitStatus = shell.exec('git status --porcelain', { silent: true });
+  
+  if (gitStatus.stdout.trim() === '') {
+    spinner.fail(chalk.yellow('⚠️  没有检测到任何变更'));
+    console.log(chalk.gray('💡 当前工作区没有待提交的文件'));
+    process.exit(0);
+  }
+
+  spinner.succeed(chalk.green('✅ 检测到文件变更'));
+
+  // 显示文件状态
+  console.log(chalk.cyan('\n📁 检测到以下文件变更:'));
+  const statusLines = gitStatus.stdout.trim().split('\n');
+  statusLines.forEach(line => {
+    const status = line.substring(0, 2);
+    const file = line.substring(3);
+    let statusIcon = '📄';
+    let statusText = '';
+    
+    if (status.includes('M')) {
+      statusIcon = '📝';
+      statusText = chalk.yellow('Modified');
+    } else if (status.includes('A')) {
+      statusIcon = '➕';
+      statusText = chalk.green('Added');
+    } else if (status.includes('D')) {
+      statusIcon = '🗑️';
+      statusText = chalk.red('Deleted');
+    } else if (status.includes('??')) {
+      statusIcon = '❓';
+      statusText = chalk.blue('Untracked');
+    }
+    
+    console.log(`  ${statusIcon} ${statusText} ${file}`);
+  });
+
+  // 询问用户如何添加文件
+  const { addChoice } = await inquirer.prompt({
+    type: 'list',
+    name: 'addChoice',
+    message: '\n📦 请选择要添加的文件:',
+    choices: [
+      { name: '🌍 添加所有文件 (git add .)', value: 'all' },
+      { name: '📝 只添加已跟踪的修改文件 (git add -u)', value: 'updated' },
+      { name: '🎯 手动选择文件', value: 'selective' },
+      { name: '🚫 取消操作', value: 'cancel' }
+    ]
+  });
+
+  if (addChoice === 'cancel') {
+    console.log(chalk.yellow('🚫 操作已取消'));
+    process.exit(0);
+  }
+
+  const addSpinner = ora('📦 正在添加文件...').start();
+
+  let addResult;
+  if (addChoice === 'all') {
+    addResult = shell.exec('git add .', { silent: true });
+  } else if (addChoice === 'updated') {
+    addResult = shell.exec('git add -u', { silent: true });
+  } else if (addChoice === 'selective') {
+    addSpinner.stop();
+    
+    // 解析文件列表用于选择
+    const fileChoices = statusLines.map(line => {
+      const file = line.substring(3);
+      const status = line.substring(0, 2);
+      let statusIcon = '📄';
+      
+      if (status.includes('M')) statusIcon = '📝';
+      else if (status.includes('A')) statusIcon = '➕';
+      else if (status.includes('D')) statusIcon = '🗑️';
+      else if (status.includes('??')) statusIcon = '❓';
+      
+      return { name: `${statusIcon} ${file}`, value: file };
+    });
+
+    const { selectedFiles } = await inquirer.prompt({
+      type: 'checkbox',
+      name: 'selectedFiles',
+      message: '请选择要添加的文件:',
+      choices: fileChoices,
+      validate: (input) => input.length > 0 || '❌ 至少选择一个文件'
+    });
+
+    addSpinner.start('📦 正在添加选中的文件...');
+    const filePaths = selectedFiles.map(f => `"${f}"`).join(' ');
+    addResult = shell.exec(`git add ${filePaths}`, { silent: true });
+  }
+
+  if (addResult.code !== 0) {
+    addSpinner.fail(chalk.red('❌ 文件添加失败'));
+    throw new Error(`Git add 失败: ${addResult.stderr}`);
+  }
+
+  addSpinner.succeed(chalk.green('✅ 文件添加成功'));
+}
+
+// 生成并执行Commit
+async function generateAndCommit() {
+  const spinner = ora('🧠 AI正在分析代码变更...').start();
+
+  try {
+    // 获取staged变更
+    const gitDiff = shell.exec('git diff --cached', { silent: true });
+    const gitStatus = shell.exec('git status --porcelain', { silent: true });
+
+    if (gitDiff.stdout.trim() === '') {
+      spinner.fail(chalk.yellow('⚠️  没有暂存的文件可以提交'));
+      throw new Error('没有暂存的文件');
+    }
+
+    // 检查API密钥
+    const apiKey = process.env.OPENAI_API_KEY || process.env.REACT_APP_OPENAI_API_KEY;
+    if (
+      !apiKey ||
+      apiKey === 'your-openai-api-key-here' ||
+      !apiKey.startsWith('sk-')
+    ) {
+      spinner.fail(chalk.red('❌ OpenAI API密钥未配置或无效'));
+      console.error(chalk.red('🔑 请设置环境变量 OPENAI_API_KEY'));
+      console.error(
+        chalk.gray('💡 提示: export OPENAI_API_KEY="sk-your-real-key"')
+      );
+      
+      // 回退到手动输入
+      return await handleManualCommit();
+    }
+
+    // 调用OpenAI API
+    const OpenAI = require('openai');
+    const openai = new OpenAI({
+      apiKey: apiKey,
+    });
+
+    const response = await openai.chat.completions.create({
+      model: 'gpt-3.5-turbo',
+      messages: [
+        {
+          role: 'system',
+          content: `你是一个专业且幽默的Git commit信息生成助手。请根据提供的git diff内容，生成一个简洁、准确、略带幽默的commit信息。
+
+要求：
+1. 使用中文
+2. 长度控制在50字以内
+3. 准确描述变更内容
+4. 可以适当幽默，但要专业
+5. 使用合适的emoji
+6. 格式：<emoji> <动作>: <具体内容>
+
+示例：
+- 🐛 修复: 用户登录时的空指针异常
+- ✨ 新增: OpenAI智能commit信息生成功能
+- 🎨 优化: 重构用户服务的代码结构
+- 📝 更新: 完善README文档说明
+- 🔧 配置: 添加ESLint规则配置`,
+        },
+        {
+          role: 'user',
+          content: `请为以下Git变更生成commit信息：
+
+Git Status:
+${gitStatus.stdout}
+
+Git Diff:
+${gitDiff.stdout.slice(0, 3000)}`,
+        },
+      ],
+      max_tokens: 100,
+      temperature: 0.7,
+    });
+
+    const commitMessage = response.choices[0].message.content.trim();
+    spinner.succeed(chalk.green('🎉 AI commit信息生成完成！'));
+
+    console.log(chalk.cyan('\n🤖 AI建议的commit信息:'));
+    console.log(chalk.yellow(`📝 ${commitMessage}\n`));
+
+    const { useAICommit } = await inquirer.prompt({
+      type: 'confirm',
+      name: 'useAICommit',
+      message: '是否使用这个commit信息进行提交？',
+      default: true,
+    });
+
+    let finalMessage;
+    if (useAICommit) {
+      finalMessage = commitMessage;
+    } else {
+      const { customMessage } = await inquirer.prompt({
+        type: 'input',
+        name: 'customMessage',
+        message: '请输入自定义commit信息:',
+        default: commitMessage,
+        validate: (input) => input.trim() !== '' || '❌ Commit信息不能为空',
+      });
+      finalMessage = customMessage;
+    }
+
+    // 执行commit
+    const commitSpinner = ora('💾 正在提交更改...').start();
+    const commitResult = shell.exec(`git commit -m "${finalMessage}"`, {
+      silent: true,
+    });
+
+    if (commitResult.code !== 0) {
+      commitSpinner.fail(chalk.red('❌ 提交失败'));
+      throw new Error(`Git commit 失败: ${commitResult.stderr}`);
+    }
+
+    commitSpinner.succeed(chalk.green('✅ 提交成功！'));
+    console.log(chalk.gray(`📋 Commit: ${finalMessage}`));
+    
+    return finalMessage;
+
+  } catch (error) {
+    spinner.fail(chalk.red('❌ 生成commit信息失败'));
+    
+    if (error.code === 'insufficient_quota') {
+      console.error(chalk.red('💳 OpenAI API配额不足，请检查账户余额'));
+    } else if (error.code === 'invalid_api_key') {
+      console.error(
+        chalk.red('🔑 OpenAI API密钥无效，请检查环境变量OPENAI_API_KEY')
+      );
+    } else {
+      console.error(chalk.red('🤖 AI服务暂时不可用:'), error.message);
+    }
+
+    return await handleManualCommit();
+  }
+}
+
+// 手动Commit处理
+async function handleManualCommit() {
+  console.log(chalk.cyan('\n📝 回退到手动输入模式:'));
+  const { manualMessage } = await inquirer.prompt({
+    type: 'input',
+    name: 'manualMessage',
+    message: '请输入commit信息:',
+    validate: (input) => input.trim() !== '' || '❌ Commit信息不能为空',
+  });
+
+  const commitSpinner = ora('💾 正在提交更改...').start();
+  const commitResult = shell.exec(`git commit -m "${manualMessage}"`, {
+    silent: true,
+  });
+
+  if (commitResult.code !== 0) {
+    commitSpinner.fail(chalk.red('❌ 提交失败'));
+    throw new Error(`Git commit 失败: ${commitResult.stderr}`);
+  }
+
+  commitSpinner.succeed(chalk.green('✅ 提交成功！'));
+  console.log(chalk.gray(`📋 Commit: ${manualMessage}`));
+  
+  return manualMessage;
+}
+
+// Git Pull 处理函数
+async function handleGitPull() {
+  const spinner = ora('📥 正在拉取远程更新...').start();
+
+  // 检查是否有远程仓库
+  const remoteResult = shell.exec('git remote', { silent: true });
+  if (remoteResult.stdout.trim() === '') {
+    spinner.info(chalk.yellow('📡 没有配置远程仓库，跳过pull操作'));
+    return;
+  }
+
+  // 获取当前分支
+  const branchResult = shell.exec('git branch --show-current', { silent: true });
+  const currentBranch = branchResult.stdout.trim();
+
+  if (!currentBranch) {
+    spinner.info(chalk.yellow('📡 未检测到当前分支，跳过pull操作'));
+    return;
+  }
+
+  // 检查远程分支是否存在
+  const remoteBranchResult = shell.exec(
+    `git ls-remote --heads origin ${currentBranch}`, 
+    { silent: true }
+  );
+  
+  if (remoteBranchResult.stdout.trim() === '') {
+    spinner.info(chalk.yellow(`📡 远程分支 ${currentBranch} 不存在，跳过pull操作`));
+    return;
+  }
+
+  // 执行pull
+  const pullResult = shell.exec('git pull origin ' + currentBranch, { silent: true });
+
+  if (pullResult.code !== 0) {
+    spinner.fail(chalk.red('❌ Pull失败'));
+    
+    // 检查是否是合并冲突
+    if (pullResult.stderr.includes('CONFLICT') || pullResult.stderr.includes('conflict')) {
+      console.error(chalk.red('💥 检测到合并冲突！'));
+      console.log(chalk.yellow('📝 请手动解决冲突后重试'));
+      console.log(chalk.gray('💡 提示: 解决冲突后运行 git add . && git commit'));
+      throw new Error('存在合并冲突，需要手动解决');
+    }
+    
+    throw new Error(`Git pull 失败: ${pullResult.stderr}`);
+  }
+
+  if (pullResult.stdout.includes('Already up to date')) {
+    spinner.succeed(chalk.green('✅ 代码已是最新版本'));
+  } else {
+    spinner.succeed(chalk.green('✅ 远程更新拉取成功'));
+    console.log(chalk.gray('📋 Pull结果:'), pullResult.stdout.trim());
+  }
+}
+
+// Git Push 处理函数  
+async function handleGitPush() {
+  const spinner = ora('📤 正在推送到远程仓库...').start();
+
+  // 获取当前分支
+  const branchResult = shell.exec('git branch --show-current', { silent: true });
+  const currentBranch = branchResult.stdout.trim();
+
+  if (!currentBranch) {
+    spinner.fail(chalk.red('❌ 未检测到当前分支'));
+    throw new Error('无法获取当前分支信息');
+  }
+
+  // 执行push
+  const pushResult = shell.exec(`git push origin ${currentBranch}`, { silent: true });
+
+  if (pushResult.code !== 0) {
+    spinner.fail(chalk.red('❌ Push失败'));
+    
+    // 检查是否需要设置上游分支
+    if (pushResult.stderr.includes('no upstream branch')) {
+      console.log(chalk.yellow('📡 正在设置上游分支...'));
+      const upstreamResult = shell.exec(`git push -u origin ${currentBranch}`, { silent: true });
+      
+      if (upstreamResult.code !== 0) {
+        throw new Error(`设置上游分支失败: ${upstreamResult.stderr}`);
+      }
+      
+      spinner.succeed(chalk.green('✅ 推送成功并设置上游分支'));
+      return;
+    }
+    
+    throw new Error(`Git push 失败: ${pushResult.stderr}`);
+  }
+
+  spinner.succeed(chalk.green('✅ 推送到远程仓库成功'));
+  console.log(chalk.gray(`📋 推送分支: ${currentBranch}`));
+}
+
 // CLI命令配置
 program
   .version(version) // 显示版本信息
-  .description('🚀 从API URL生成TypeScript类型定义')
+  .description('🚀 PF-CLI - 从API生成TypeScript类型 + AI Git助手');
+
+// 添加git commit子命令
+program
+  .command('commit')
+  .alias('c')
+  .description('🤖 使用AI生成Git commit信息并执行完整工作流')
+  .action(generateCommitMessage);
+
+// 原有的主命令
+program
   .option('-u, --url <url>', 'API URL地址')
   .option('-n, --name <name>', '生成的类型名称')
   .option('-p, --path <path>', '保存路径')
