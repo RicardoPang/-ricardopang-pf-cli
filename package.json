@@ -1,0 +1,37 @@
+{
+  "name": "@ricardopang/pf-cli",
+  "version": "1.0.0",
+  "description": "开发一个CLI 发布到私仓",
+  "bin": {
+    "pf-gen": "./bin/cli.js"
+  },
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "publishConfig": {
+    "registry": "http://localhost:4873/"
+  },
+  "keywords": [
+    "quicktype",
+    "cli",
+    "typescript",
+    "types"
+  ],
+  "author": "RicardoPang",
+  "dependencies": {
+    "@darkobits/lolcatjs": "^3.1.3",
+    "chalk": "^4.1.0",
+    "commander": "^11.0.0",
+    "figlet": "^1.8.0",
+    "inquirer": "^8.2.6",
+    "ora": "^4.0.4",
+    "quicktype-core": "^23.0.170",
+    "shelljs": "^0.8.5"
+  },
+  "license": "ISC",
+  "devDependencies": {
+    "@types/figlet": "^1.7.0",
+    "@types/shelljs": "^0.8.16"
+  }
+}
